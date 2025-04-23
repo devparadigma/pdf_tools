@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Converter Tool</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>PDF Конвертер</h1>
+        
+        <div class="drop-zone" id="dropZone">
+            <span class="drop-zone__prompt">Перетащите файл сюда или кликните</span>
+            <input type="file" id="fileInput" class="drop-zone__input" accept=".pdf,.jpg,.jpeg,.png">
+        </div>
+
+        <div class="buttons">
+            <button onclick="convert('pdf-to-word')">PDF → Word</button>
+            <button onclick="convert('jpeg-to-pdf')">JPEG → PDF</button>
+            <button onclick="convert('compress-pdf')">Сжать PDF</button>
+        </div>
+
+        <div id="status"></div>
+    </div>
+
+    <script>
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const statusDiv = document.getElementById('status');
+        let currentFile = null;
+
+        // Обработка Drag & Drop
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('drop-zone--over');
+        });
+
+        ['dragleave', 'dragend'].forEach(type => {
+            dropZone.addEventListener(type, () => {
+                dropZone.classList.remove('drop-zone--over');
+            });
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('drop-zone--over');
+            
+            if (e.dataTransfer.files.length) {
+                currentFile = e.dataTransfer.files[0];
+                updateFileName();
+            }
+        });
+
+        // Обработка клика для выбора файла
+        dropZone.addEventListener('click', () => {
+            fileInput.click();
+        });
+
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length) {
+                currentFile = fileInput.files[0];
+                updateFileName();
+            }
+        });
+
+        function updateFileName() {
+            const prompt = dropZone.querySelector('.drop-zone__prompt');
+            if (currentFile) {
+                prompt.textContent = currentFile.name;
+                prompt.style.color = '#333';
+            } else {
+                prompt.textContent = "Перетащите файл сюда или кликните";
+                prompt.style.color = '#666';
+            }
+        }
+
+        async function convert(endpoint) {
+            if (!currentFile) {
+                showStatus("Ошибка: файл не выбран", "error");
+                return;
+            }
+
+            showStatus("Обработка...", "processing");
+
+            const formData = new FormData();
+            formData.append('file', currentFile);
+
+            try {
+                const response = await fetch(`/${endpoint}`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const contentType = response.headers.get('content-type');
+                
+                if (!response.ok) {
+                    const error = contentType?.includes('application/json') 
+                        ? await response.json()
+                        : await response.text();
+                    throw new Error(error.error || error.message || error || "Unknown error");
+                }
+
+                if (contentType?.includes('application/json')) {
+                    const data = await response.json();
+                    showStatus("Успешно: " + JSON.stringify(data), "success");
+                } else {
+                    const blob = await response.blob();
+                    downloadFile(blob, currentFile.name, endpoint);
+                    showStatus("Готово! Файл скачивается...", "success");
+                }
+            } catch (err) {
+                console.error("Conversion error:", err);
+                showStatus(`Ошибка: ${err.message}`, "error");
+            }
+        }
+
+        function downloadFile(blob, originalName, endpoint) {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = generateDownloadName(originalName, endpoint);
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        function generateDownloadName(originalName, endpoint) {
+            const name = originalName.replace(/\.[^/.]+$/, "");
+            switch(endpoint) {
+                case 'pdf-to-word': return `${name}.docx`;
+                case 'jpeg-to-pdf': return `${name}.pdf`;
+                case 'compress-pdf': return `${name}_compressed.pdf`;
+                default: return originalName;
+            }
+        }
+
+        function showStatus(message, type) {
+            statusDiv.textContent = message;
+            statusDiv.className = type; // Добавляем класс для стилизации
+        }
+    </script>
+</body>
+</html>
