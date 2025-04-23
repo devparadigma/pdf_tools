@@ -267,7 +267,7 @@ def compress_pdf():
         # Используем ghostscript для сжатия
         logger.info("Запуск Ghostscript для сжатия PDF")
         gs_command = [
-            'C:\\Program Files\\gs\\gs10.05.0\\bin\\gswin64c.exe', '-sDEVICE=pdfwrite', '-dCompatibilityLevel=1.4',
+            'gs', '-sDEVICE=pdfwrite', '-dCompatibilityLevel=1.4',
             '-dPDFSETTINGS=/ebook', '-dNOPAUSE', '-dBATCH', '-dQUIET',
             '-dDownsampleColorImages=true', '-dColorImageResolution=72',
             '-dRemoveUnusedObjects=true',
