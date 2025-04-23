@@ -2,5 +2,4 @@ Flask
 Werkzeug
 Pillow
 requests
-convertapi
 pdfservices-sdk
