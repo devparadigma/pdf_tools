@@ -2,10 +2,24 @@ import os
 import logging
 import subprocess
 import requests
+import tempfile
 from flask import Flask, request, jsonify, send_file, render_template
 from werkzeug.utils import secure_filename
 from PIL import Image
-import convertapi
+from datetime import datetime
+
+# Импорты для Adobe PDF Services SDK
+from adobe.pdfservices.operation.auth.service_principal_credentials import ServicePrincipalCredentials
+from adobe.pdfservices.operation.exception.exceptions import ServiceApiException, ServiceUsageException, SdkException
+from adobe.pdfservices.operation.io.cloud_asset import CloudAsset
+from adobe.pdfservices.operation.io.stream_asset import StreamAsset
+from adobe.pdfservices.operation.pdf_services import PDFServices
+from adobe.pdfservices.operation.pdf_services_media_type import PDFServicesMediaType
+from adobe.pdfservices.operation.pdfjobs.jobs.export_pdf_job import ExportPDFJob
+from adobe.pdfservices.operation.pdfjobs.params.export_pdf.export_ocr_locale import ExportOCRLocale
+from adobe.pdfservices.operation.pdfjobs.params.export_pdf.export_pdf_params import ExportPDFParams
+from adobe.pdfservices.operation.pdfjobs.params.export_pdf.export_pdf_target_format import ExportPDFTargetFormat
+from adobe.pdfservices.operation.pdfjobs.result.export_pdf_result import ExportPDFResult
 
 # Настройка логирования
 logging.basicConfig(
@@ -15,7 +29,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Создание временной директории для загрузки файлов
-import tempfile
 TEMP_DIR = tempfile.mkdtemp()
 logger.info(f"Запуск приложения. Временная директория: {TEMP_DIR}")
 
@@ -23,8 +36,19 @@ app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = TEMP_DIR
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 МБ максимальный размер файла
 
-# Секрет для ConvertAPI
-CONVERT_API_SECRET = "token_vU8NsC5l"  # Замените на ваш ключ
+# Adobe PDF Services API учетные данные
+PDF_SERVICES_CLIENT_ID = "YOUR_ADOBE_CLIENT_ID"
+PDF_SERVICES_CLIENT_SECRET = "YOUR_ADOBE_CLIENT_SECRET"
+
+# Функция для очистки временных файлов
+def cleanup_files(*file_paths):
+    for file_path in file_paths:
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+                logger.info(f"Удален временный файл: {file_path}")
+            except Exception as e:
+                logger.error(f"Ошибка при удалении файла {file_path}: {str(e)}")
 
 @app.route('/')
 def index():
@@ -81,49 +105,51 @@ def pdf_to_word():
             logger.error("Сохраненный файл имеет нулевой размер")
             return jsonify({"error": "Загруженный файл пуст"}), 400
         
-        # Установка учетных данных API
-        convertapi.api_credentials = CONVERT_API_SECRET
-        logger.info("API учетные данные установлены")
-        
         # Получаем имя файла без расширения для результата
         output_filename = filename_base + '.docx'
-        logger.info(f"Имя выходного файла: {output_filename}")
-        
-        # Конвертация через API
-        logger.info(f"Начало конвертации файла {pdf_path}")
-        result = convertapi.convert(
-            'docx', 
-            {
-                'File': pdf_path
-            },
-            from_format='pdf'
-        )
-        logger.info("Конвертация завершена, получен результат")
-        
-        # Логируем ответ API для отладки
-        logger.info(f"Ответ API: {result.response}")
-        
-        # Определяем путь для сохранения результата
         docx_path = os.path.join(app.config['UPLOAD_FOLDER'], output_filename)
         logger.info(f"Путь для сохранения результата: {docx_path}")
         
-        # Сохраняем результат
-        result.save_files(app.config['UPLOAD_FOLDER'])
-        logger.info("Результат сохранен")
+        # Чтение содержимого PDF файла
+        with open(pdf_path, 'rb') as file:
+            input_stream = file.read()
+        
+        # Настройка учетных данных Adobe PDF Services API
+        credentials = ServicePrincipalCredentials(
+            client_id=PDF_SERVICES_CLIENT_ID,
+            client_secret=PDF_SERVICES_CLIENT_SECRET
+        )
+        
+        # Создание экземпляра PDF Services
+        pdf_services = PDFServices(credentials=credentials)
+        
+        # Загрузка PDF файла как ассета
+        input_asset = pdf_services.upload(input_stream=input_stream, mime_type=PDFServicesMediaType.PDF)
+        
+        # Создание параметров для задания
+        export_pdf_params = ExportPDFParams(target_format=ExportPDFTargetFormat.DOCX)
+        
+        # Создание нового экземпляра задания
+        export_pdf_job = ExportPDFJob(input_asset=input_asset, export_pdf_params=export_pdf_params)
+        
+        # Отправка задания и получение результата
+        location = pdf_services.submit(export_pdf_job)
+        pdf_services_response = pdf_services.get_job_result(location, ExportPDFResult)
+        
+        # Получение содержимого из результирующего ассета
+        result_asset = pdf_services_response.get_result().get_asset()
+        stream_asset = pdf_services.get_content(result_asset)
+        
+        # Сохранение результата в файл
+        with open(docx_path, "wb") as file:
+            file.write(stream_asset.get_input_stream())
+        
+        logger.info(f"Результат сохранен по пути: {docx_path}")
         
         # Проверяем, что файл был создан
         if not os.path.exists(docx_path):
-            logger.warning(f"Файл не найден по пути {docx_path}, пробуем альтернативный метод")
-            # Если файл не найден по ожидаемому пути, попробуем найти его по URL из ответа
-            file_info = result.response['Files'][0]
-            download_url = file_info['Url']
-            logger.info(f"URL для скачивания: {download_url}")
-            
-            # Скачиваем файл по URL
-            response = requests.get(download_url)
-            with open(docx_path, 'wb') as f:
-                f.write(response.content)
-            logger.info(f"Файл скачан и сохранен по пути {docx_path}")
+            logger.error(f"Файл не был создан по пути: {docx_path}")
+            return jsonify({"error": "Ошибка при создании DOCX файла"}), 500
         
         # Отправляем файл пользователю
         logger.info(f"Отправка файла пользователю: {docx_path}")
@@ -133,6 +159,15 @@ def pdf_to_word():
             download_name=output_filename
         )
         
+    except ServiceApiException as e:
+        logger.error(f"Ошибка Adobe PDF Services API: {str(e)}", exc_info=True)
+        return jsonify({"error": f"Ошибка API Adobe: {str(e)}"}), 500
+    except ServiceUsageException as e:
+        logger.error(f"Ошибка использования Adobe PDF Services: {str(e)}", exc_info=True)
+        return jsonify({"error": f"Ошибка использования сервиса Adobe: {str(e)}"}), 500
+    except SdkException as e:
+        logger.error(f"Ошибка SDK Adobe: {str(e)}", exc_info=True)
+        return jsonify({"error": f"Ошибка SDK Adobe: {str(e)}"}), 500
     except Exception as e:
         logger.error(f"Критическая ошибка: {str(e)}", exc_info=True)
         return jsonify({"error": f"Внутренняя ошибка сервера: {str(e)}"}), 500
@@ -140,6 +175,7 @@ def pdf_to_word():
         # Очистка временных файлов
         cleanup_files(pdf_path, docx_path)
         logger.info("Временные файлы очищены")
+
 
 @app.route('/jpeg-to-pdf', methods=['POST'])
 def jpeg_to_pdf():
@@ -231,7 +267,7 @@ def compress_pdf():
         # Используем ghostscript для сжатия
         logger.info("Запуск Ghostscript для сжатия PDF")
         gs_command = [
-            'gs', '-sDEVICE=pdfwrite', '-dCompatibilityLevel=1.4',
+            'C:\\Program Files\\gs\\gs10.05.0\\bin\\gswin64c.exe', '-sDEVICE=pdfwrite', '-dCompatibilityLevel=1.4',
             '-dPDFSETTINGS=/ebook', '-dNOPAUSE', '-dBATCH', '-dQUIET',
             '-dDownsampleColorImages=true', '-dColorImageResolution=72',
             '-dRemoveUnusedObjects=true',
@@ -248,18 +284,17 @@ def compress_pdf():
         
         if compressed_size >= original_size:
             # Если сжатие не дало результата, возвращаем оригинал с предупреждением
-            logger.info("Сжатие не дало результата, возвращаем оригинал")
-            cleanup_files(compressed_path)
-            return jsonify({
-                "warning": "Файл не удалось сжать дальше. Возвращен оригинал.",
-                "original_size": original_size,
-                "compressed_size": original_size
-            }), 200
+            logger.info("Сжатие не уменьшило размер файла, возвращаем оригинал")
+            return send_file(
+                pdf_path,
+                as_attachment=True,
+                download_name=filename_base + '_original.pdf'
+            ), 200
         
         logger.info(f"Отправка сжатого PDF пользователю: {compressed_path}")
         return send_file(
-            compressed_path, 
-            as_attachment=True, 
+            compressed_path,
+            as_attachment=True,
             download_name=filename_base + '_compressed.pdf'
         )
         
@@ -271,15 +306,5 @@ def compress_pdf():
         cleanup_files(pdf_path, compressed_path)
         logger.info("Временные файлы очищены")
 
-def cleanup_files(*files):
-    """Удаляет временные файлы, если они существуют"""
-    for file_path in files:
-        if file_path and os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-                logger.info(f"Удален файл: {file_path}")
-            except Exception as e:
-                logger.error(f"Ошибка при удалении файла {file_path}: {str(e)}")
-
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', debug=True)
+    app.run(debug=True, port=5000)
